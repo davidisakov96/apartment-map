@@ -23,12 +23,26 @@
   #top { padding: 10px 12px 8px; display: flex; gap: 8px; align-items: center; }
   #search { flex: 1; min-width: 0; padding: 9px 12px; border-radius: 10px; border: 0;
     background: var(--sheet); color: var(--text); font-size: 16px; outline: none; }
-  #results { position: absolute; top: 52px; right: 12px; left: 12px; z-index: 1000; background: var(--bg);
+  #results { position: absolute; top: 52px; right: 12px; left: 12px; z-index: 1200; background: var(--bg);
     border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.18); max-height: 45vh; overflow: auto; display: none; }
   #results button { display: flex; justify-content: space-between; width: 100%; padding: 11px 14px; border: 0;
     background: none; color: var(--text); font: inherit; text-align: right; border-bottom: 1px solid var(--sheet); }
   #results small { color: var(--hint); }
-  #map { flex: 1; min-height: 0; }
+  #mapwrap { flex: 1; min-height: 0; position: relative; }
+  #map { position: absolute; inset: 0; }
+  #listbtn { flex: none; border: 0; border-radius: 10px; padding: 9px 12px; background: var(--sheet);
+    color: var(--accent); font: inherit; font-weight: 600; }
+  #list { position: absolute; inset: 0; z-index: 1100; overflow-y: auto; background: var(--bg); padding: 0 12px 12px;
+    -webkit-overflow-scrolling: touch; }
+  #list h3 { margin: 14px 0 4px; font-size: 13px; color: var(--hint); font-weight: 600; }
+  #list .row { display: flex; justify-content: space-between; align-items: center; width: 100%; padding: 12px 4px;
+    border: 0; border-bottom: 1px solid var(--sheet); background: none; color: var(--text); font: inherit; text-align: right; }
+  #list .row .mark { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--hint); flex: none;
+    display: flex; align-items: center; justify-content: center; font-size: 13px; color: var(--accent-text); }
+  #list .row.on .mark { background: var(--accent); border-color: var(--accent); }
+  #list .row.on .mark::after { content: "✓"; }
+  #err { color: #d33; font-size: 12px; }
+  #ver { color: var(--hint); font-size: 10px; opacity: .6; }
   #sheet { background: var(--sheet); padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); }
   #sheet-head { display: flex; justify-content: space-between; align-items: center; color: var(--hint); font-size: 13px; }
   #sheet-head button { border: 0; background: none; color: var(--accent); font: inherit; padding: 4px 0; }
@@ -49,15 +63,24 @@
 </style>
 </head>
 <body>
-<div id="top"><input id="search" type="search" placeholder="🔍 חפש שכונה או עיר" autocomplete="off"></div>
+<div id="top"><input id="search" type="search" placeholder="🔍 חפש שכונה או עיר" autocomplete="off">
+  <button id="listbtn" type="button">📋 רשימה</button></div>
 <div id="results"></div>
-<div id="map"></div>
+<div id="mapwrap"><div id="map"></div><div id="list" hidden></div></div>
 <div id="sheet">
   <div id="sheet-head"><span id="count">לחץ על שכונה במפה כדי לסמן אותה</span><button id="clear" hidden>נקה הכל</button></div>
   <div id="chips"></div>
   <button id="save">שמור</button>
+  <div id="err"></div>
+  <div id="ver">גרסה 3</div>
 </div>
 <div id="toast"></div>
+<script>
+// Show any error on screen, so a screenshot from the phone tells what went wrong.
+function showErr(msg) { const e = document.getElementById("err"); if (e) e.textContent += "⚠️ " + msg + " "; }
+window.addEventListener("error", e => showErr((e.message || "error") + (e.lineno ? " @" + e.lineno : "")));
+window.addEventListener("unhandledrejection", e => showErr(String(e.reason)));
+</script>
 <script>
 const tg = window.Telegram && Telegram.WebApp;
 const inTelegram = !!(tg && tg.initData !== undefined && tg.platform && tg.platform !== "unknown");
@@ -96,7 +119,39 @@ function toggle(id, quiet) {
   try { if (tg && tg.HapticFeedback) tg.HapticFeedback.selectionChanged(); } catch (e) {}
   if (!quiet) toast((selected.has(id) ? "✓ " : "הוסר: ") + label(id));
   render();
+  if (!document.getElementById("list").hidden) renderList();
 }
+
+// ---- list view: the same choice without the map ----
+function renderList() {
+  const box = document.getElementById("list"), top = box.scrollTop;
+  box.innerHTML = "";
+  const order = ["תל אביב", "רמת גן", "גבעתיים"];
+  const groups = {};
+  Object.values(props).forEach(p => {
+    const g = p.kind === "city" ? "ערים נוספות (כל העיר)" : p.city;
+    (groups[g] = groups[g] || []).push(p);
+  });
+  Object.keys(groups).sort((a, b) => (order.indexOf(a) + 1 || 9) - (order.indexOf(b) + 1 || 9)).forEach(g => {
+    const h = document.createElement("h3"); h.textContent = g; box.appendChild(h);
+    groups[g].sort((a, b) => a.name.localeCompare(b.name, "he")).forEach(p => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "row" + (selected.has(p.id) ? " on" : "");
+      b.innerHTML = `<span></span><span class="mark"></span>`;
+      b.firstChild.textContent = p.name;
+      b.onclick = () => toggle(p.id, true);
+      box.appendChild(b);
+    });
+  });
+  box.scrollTop = top;
+}
+document.getElementById("listbtn").onclick = () => {
+  const box = document.getElementById("list"), btn = document.getElementById("listbtn");
+  box.hidden = !box.hidden;
+  btn.textContent = box.hidden ? "📋 רשימה" : "🗺 מפה";
+  if (!box.hidden) renderList(); else map.invalidateSize();
+};
 
 function label(id) {
   const p = props[id];
@@ -178,20 +233,43 @@ function inGeom(x, y, g) {
 function setupTaps(features) {
   const hoods = features.filter(f => f.properties.kind !== "city"), cities = features.filter(f => f.properties.kind === "city");
   const el = map.getContainer();
-  let start = null, multi = false;
+  let lastTap = 0;
+  function tapAt(x, y, target) {
+    // iPhone sends both touch and pointer events for one tap: act once.
+    if (Date.now() - lastTap < 450) return;
+    if (target && target.closest && target.closest(".leaflet-control")) return;
+    lastTap = Date.now();
+    const r = el.getBoundingClientRect();
+    const ll = map.containerPointToLatLng([x - r.left, y - r.top]);
+    const hit = hoods.find(f => inGeom(ll.lng, ll.lat, f.geometry)) || cities.find(f => inGeom(ll.lng, ll.lat, f.geometry));
+    if (hit) toggle(hit.properties.id);
+  }
+  const isTap = (s, x, y) => s && Math.hypot(x - s.x, y - s.y) <= 14 && Date.now() - s.t < 700;
+
+  // touch events (what iPhone's Telegram reliably sends)
+  let tstart = null;
+  el.addEventListener("touchstart", e => {
+    tstart = e.touches.length === 1 ? { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now() } : null;
+  }, { capture: true, passive: true });
+  el.addEventListener("touchmove", e => {
+    if (tstart && (e.touches.length > 1 || !isTap(tstart, e.touches[0].clientX, e.touches[0].clientY))) tstart = null;
+  }, { capture: true, passive: true });
+  el.addEventListener("touchend", e => {
+    const t = e.changedTouches[0];
+    if (t && isTap(tstart, t.clientX, t.clientY)) tapAt(t.clientX, t.clientY, e.target);
+    tstart = null;
+  }, { capture: true, passive: true });
+
+  // pointer events (computer mouse, Android)
+  let pstart = null, multi = false;
   el.addEventListener("pointerdown", e => {
     if (!e.isPrimary) { multi = true; return; }  // second finger = pinch zoom, not a tap
     multi = false;
-    start = { x: e.clientX, y: e.clientY, t: Date.now() };
+    pstart = { x: e.clientX, y: e.clientY, t: Date.now() };
   }, true);
   el.addEventListener("pointerup", e => {
-    if (!e.isPrimary || !start || multi) return;
-    const moved = Math.hypot(e.clientX - start.x, e.clientY - start.y), quick = Date.now() - start.t < 600;
-    start = null;
-    if (moved > 14 || !quick || e.target.closest(".leaflet-control")) return;
-    const ll = map.mouseEventToLatLng(e);
-    const hit = hoods.find(f => inGeom(ll.lng, ll.lat, f.geometry)) || cities.find(f => inGeom(ll.lng, ll.lat, f.geometry));
-    if (hit) toggle(hit.properties.id);
+    if (e.isPrimary && !multi && isTap(pstart, e.clientX, e.clientY)) tapAt(e.clientX, e.clientY, e.target);
+    pstart = null;
   }, true);
 }
 
