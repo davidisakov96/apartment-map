@@ -61,9 +61,15 @@
 <script>
 const tg = window.Telegram && Telegram.WebApp;
 const inTelegram = !!(tg && tg.initData !== undefined && tg.platform && tg.platform !== "unknown");
-if (tg) { tg.ready(); tg.expand(); }
+if (tg) {
+  tg.ready(); tg.expand();
+  // On iPhone, Telegram treats a small finger move as "swipe down to close", which eats taps on the map.
+  try { if (tg.disableVerticalSwipes) tg.disableVerticalSwipes(); } catch (e) {}
+}
 
-const selected = new Set(new URLSearchParams(location.hash.slice(1)).get("s")?.split(",").filter(Boolean) || []);
+// The bot passes the current choice as ?s=id,id (Telegram adds its own data to the #hash).
+const selParam = new URLSearchParams(location.search).get("s") || new URLSearchParams(location.hash.slice(1)).get("s") || "";
+const selected = new Set(selParam.split(",").filter(Boolean));
 const layers = {}, props = {};
 const map = L.map("map", { zoomControl: false, attributionControl: true }).setView([32.075, 34.8], 13);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -87,7 +93,7 @@ function toast(msg) {
 function toggle(id, quiet) {
   selected.has(id) ? selected.delete(id) : selected.add(id);
   layers[id].setStyle(style(id));
-  if (tg && tg.HapticFeedback) tg.HapticFeedback.selectionChanged();
+  try { if (tg && tg.HapticFeedback) tg.HapticFeedback.selectionChanged(); } catch (e) {}
   if (!quiet) toast((selected.has(id) ? "✓ " : "הוסר: ") + label(id));
   render();
 }
@@ -156,16 +162,50 @@ search.addEventListener("input", () => {
   results.style.display = "block";
 });
 
+// ---- taps: find the area under the finger ourselves ----
+function inRing(x, y, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i], [xj, yj] = ring[j];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+function inGeom(x, y, g) {
+  const polys = g.type === "Polygon" ? [g.coordinates] : g.type === "MultiPolygon" ? g.coordinates : [];
+  return polys.some(rings => inRing(x, y, rings[0]) && !rings.slice(1).some(h => inRing(x, y, h)));
+}
+function setupTaps(features) {
+  const hoods = features.filter(f => f.properties.kind !== "city"), cities = features.filter(f => f.properties.kind === "city");
+  const el = map.getContainer();
+  let start = null, multi = false;
+  el.addEventListener("pointerdown", e => {
+    if (!e.isPrimary) { multi = true; return; }  // second finger = pinch zoom, not a tap
+    multi = false;
+    start = { x: e.clientX, y: e.clientY, t: Date.now() };
+  }, true);
+  el.addEventListener("pointerup", e => {
+    if (!e.isPrimary || !start || multi) return;
+    const moved = Math.hypot(e.clientX - start.x, e.clientY - start.y), quick = Date.now() - start.t < 600;
+    start = null;
+    if (moved > 14 || !quick || e.target.closest(".leaflet-control")) return;
+    const ll = map.mouseEventToLatLng(e);
+    const hit = hoods.find(f => inGeom(ll.lng, ll.lat, f.geometry)) || cities.find(f => inGeom(ll.lng, ll.lat, f.geometry));
+    if (hit) toggle(hit.properties.id);
+  }, true);
+}
+
 fetch("areas.geojson").then(r => r.json()).then(gj => {
   // whole cities first, so neighborhoods are drawn on top
   gj.features.sort((a, b) => (a.properties.kind === "city" ? 0 : 1) - (b.properties.kind === "city" ? 0 : 1));
   gj.features.forEach(f => {
     const p = f.properties; props[p.id] = p;
-    const layer = L.geoJSON(f, { style: () => style(p.id) }).addTo(map);
-    layer.on("click", () => toggle(p.id));
-    layer.bindTooltip(p.kind === "city" ? p.name : p.name, { permanent: true, direction: "center", className: "lbl" });
+    // Not interactive: taps are handled below, so a slightly moving finger still counts as a tap.
+    const layer = L.geoJSON(f, { style: () => style(p.id), interactive: false }).addTo(map);
+    layer.bindTooltip(p.name, { permanent: true, direction: "center", className: "lbl" });
     layers[p.id] = layer;
   });
+  setupTaps(gj.features);
   const showLabels = () => {
     const z = map.getZoom();
     Object.entries(layers).forEach(([id, l]) => {
