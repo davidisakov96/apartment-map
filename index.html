@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>בחירת אזורים</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --text: var(--tg-theme-text-color, #1c1c1e);
+    --hint: var(--tg-theme-hint-color, #8a8a8e);
+    --accent: var(--tg-theme-button-color, #2481cc);
+    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+    --sheet: var(--tg-theme-secondary-bg-color, #f2f2f7);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 15px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; }
+  body { display: flex; flex-direction: column; overflow: hidden; }
+  #top { padding: 10px 12px 8px; display: flex; gap: 8px; align-items: center; }
+  #search { flex: 1; min-width: 0; padding: 9px 12px; border-radius: 10px; border: 0;
+    background: var(--sheet); color: var(--text); font-size: 16px; outline: none; }
+  #results { position: absolute; top: 52px; right: 12px; left: 12px; z-index: 1000; background: var(--bg);
+    border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.18); max-height: 45vh; overflow: auto; display: none; }
+  #results button { display: flex; justify-content: space-between; width: 100%; padding: 11px 14px; border: 0;
+    background: none; color: var(--text); font: inherit; text-align: right; border-bottom: 1px solid var(--sheet); }
+  #results small { color: var(--hint); }
+  #map { flex: 1; min-height: 0; }
+  #sheet { background: var(--sheet); padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); }
+  #sheet-head { display: flex; justify-content: space-between; align-items: center; color: var(--hint); font-size: 13px; }
+  #sheet-head button { border: 0; background: none; color: var(--accent); font: inherit; padding: 4px 0; }
+  #chips { display: flex; gap: 6px; overflow-x: auto; padding: 8px 0 2px; scrollbar-width: none; }
+  #chips::-webkit-scrollbar { display: none; }
+  .chip { flex: none; border: 0; border-radius: 16px; padding: 6px 11px; background: var(--accent);
+    color: var(--accent-text); font: inherit; font-size: 14px; white-space: nowrap; }
+  .chip::after { content: " ✕"; opacity: .8; }
+  #empty { color: var(--hint); font-size: 14px; padding: 8px 0 4px; }
+  #save { display: none; width: 100%; margin-top: 8px; padding: 12px; border: 0; border-radius: 10px;
+    background: var(--accent); color: var(--accent-text); font: inherit; font-weight: 600; }
+  .leaflet-tooltip.lbl { background: rgba(255,255,255,.85); border: 0; box-shadow: none; padding: 1px 5px;
+    font-size: 11px; color: #222; border-radius: 4px; }
+  .leaflet-tooltip.lbl::before { display: none; }
+  #toast { position: absolute; bottom: 120px; left: 50%; transform: translateX(-50%); z-index: 1000;
+    background: rgba(0,0,0,.78); color: #fff; padding: 7px 14px; border-radius: 18px; font-size: 14px;
+    opacity: 0; transition: opacity .2s; pointer-events: none; white-space: nowrap; }
+</style>
+</head>
+<body>
+<div id="top"><input id="search" type="search" placeholder="🔍 חפש שכונה או עיר" autocomplete="off"></div>
+<div id="results"></div>
+<div id="map"></div>
+<div id="sheet">
+  <div id="sheet-head"><span id="count">לחץ על שכונה במפה כדי לסמן אותה</span><button id="clear" hidden>נקה הכל</button></div>
+  <div id="chips"></div>
+  <button id="save">שמור</button>
+</div>
+<div id="toast"></div>
+<script>
+const tg = window.Telegram && Telegram.WebApp;
+const inTelegram = !!(tg && tg.initData !== undefined && tg.platform && tg.platform !== "unknown");
+if (tg) { tg.ready(); tg.expand(); }
+
+const selected = new Set(new URLSearchParams(location.hash.slice(1)).get("s")?.split(",").filter(Boolean) || []);
+const layers = {}, props = {};
+const map = L.map("map", { zoomControl: false, attributionControl: true }).setView([32.075, 34.8], 13);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 18, attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+}).addTo(map);
+
+const ACCENT = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#2481cc";
+function style(id) {
+  const on = selected.has(id), city = props[id].kind === "city";
+  return { color: on ? ACCENT : "#5b6b7c", weight: on ? 2.5 : 1, dashArray: city ? "4 4" : null,
+           fillColor: on ? ACCENT : "#8aa0b6", fillOpacity: on ? 0.45 : (city ? 0.04 : 0.1) };
+}
+
+let toastTimer;
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.style.opacity = 1;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.style.opacity = 0, 1300);
+}
+
+function toggle(id, quiet) {
+  selected.has(id) ? selected.delete(id) : selected.add(id);
+  layers[id].setStyle(style(id));
+  if (tg && tg.HapticFeedback) tg.HapticFeedback.selectionChanged();
+  if (!quiet) toast((selected.has(id) ? "✓ " : "הוסר: ") + label(id));
+  render();
+}
+
+function label(id) {
+  const p = props[id];
+  return p.kind === "city" || p.city === "תל אביב" ? p.name : `${p.name} (${p.city})`;
+}
+
+function render() {
+  const ids = [...selected].filter(id => props[id]);
+  const chips = document.getElementById("chips");
+  chips.innerHTML = "";
+  ids.forEach(id => {
+    const b = document.createElement("button");
+    b.className = "chip"; b.textContent = label(id);
+    b.onclick = () => { map.fitBounds(layers[id].getBounds(), { maxZoom: 15 }); toggle(id); };
+    chips.appendChild(b);
+  });
+  document.getElementById("count").textContent = ids.length
+    ? `נבחרו ${ids.length} אזורים` : "לא נבחר אזור, כלומר כל מקום. לחץ על שכונה כדי לסמן";
+  document.getElementById("clear").hidden = !ids.length;
+  const text = ids.length ? `שמור (${ids.length})` : "שמור: כל מקום";
+  if (inTelegram) {
+    tg.MainButton.setText(text);
+    tg.MainButton.show();
+  } else {
+    const s = document.getElementById("save");
+    s.style.display = "block"; s.textContent = text;
+  }
+}
+
+function save() {
+  const data = JSON.stringify({ v: 1, ids: [...selected].filter(id => props[id]) });
+  if (inTelegram) tg.sendData(data);  // closes the map and sends the choice to the bot
+  else alert("פתח את המפה מתוך הבוט בטלגרם כדי לשמור.\n\n" + data);
+}
+
+document.getElementById("save").onclick = save;
+if (inTelegram) tg.MainButton.onClick(save);
+document.getElementById("clear").onclick = () => {
+  [...selected].forEach(id => { selected.delete(id); layers[id] && layers[id].setStyle(style(id)); });
+  render();
+};
+
+// search
+const search = document.getElementById("search"), results = document.getElementById("results");
+const loose = s => s.replace(/["'`׳״\-־.,()]/g, "").replace(/\s+/g, " ").trim();
+search.addEventListener("input", () => {
+  const q = loose(search.value);
+  results.innerHTML = "";
+  if (!q) { results.style.display = "none"; return; }
+  const hits = Object.values(props).filter(p =>
+    loose(p.name).includes(q) || loose(p.city).includes(q) || p.keys.some(k => loose(k).includes(q))).slice(0, 12);
+  hits.forEach(p => {
+    const b = document.createElement("button");
+    b.innerHTML = `<span>${selected.has(p.id) ? "✓ " : ""}${p.name}</span><small>${p.kind === "city" ? "כל העיר" : p.city}</small>`;
+    b.onclick = () => {
+      search.value = ""; results.style.display = "none"; search.blur();
+      map.fitBounds(layers[p.id].getBounds(), { maxZoom: 15 });
+      if (!selected.has(p.id)) toggle(p.id);
+    };
+    results.appendChild(b);
+  });
+  if (!hits.length) results.innerHTML = '<button disabled><span>לא נמצא</span></button>';
+  results.style.display = "block";
+});
+
+fetch("areas.geojson").then(r => r.json()).then(gj => {
+  // whole cities first, so neighborhoods are drawn on top
+  gj.features.sort((a, b) => (a.properties.kind === "city" ? 0 : 1) - (b.properties.kind === "city" ? 0 : 1));
+  gj.features.forEach(f => {
+    const p = f.properties; props[p.id] = p;
+    const layer = L.geoJSON(f, { style: () => style(p.id) }).addTo(map);
+    layer.on("click", () => toggle(p.id));
+    layer.bindTooltip(p.kind === "city" ? p.name : p.name, { permanent: true, direction: "center", className: "lbl" });
+    layers[p.id] = layer;
+  });
+  const showLabels = () => {
+    const z = map.getZoom();
+    Object.entries(layers).forEach(([id, l]) => {
+      const on = props[id].kind === "city" ? z <= 13 : z >= 14 || (z >= 13 && selected.has(id));
+      on ? l.openTooltip() : l.closeTooltip();
+    });
+  };
+  map.on("zoomend", showLabels);
+  const sel = [...selected].filter(id => layers[id]);
+  if (sel.length) map.fitBounds(L.featureGroup(sel.map(id => layers[id])).getBounds(), { maxZoom: 14, padding: [20, 20] });
+  showLabels();
+  render();
+}).catch(() => { document.getElementById("count").textContent = "שגיאה בטעינת המפה, נסה שוב"; });
+</script>
+</body>
+</html>
