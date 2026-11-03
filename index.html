@@ -54,9 +54,9 @@
   #empty { color: var(--hint); font-size: 14px; padding: 8px 0 4px; }
   #save { display: none; width: 100%; margin-top: 8px; padding: 12px; border: 0; border-radius: 10px;
     background: var(--accent); color: var(--accent-text); font: inherit; font-weight: 600; }
-  .leaflet-tooltip.lbl { background: rgba(255,255,255,.85); border: 0; box-shadow: none; padding: 1px 5px;
-    font-size: 11px; color: #222; border-radius: 4px; }
-  .leaflet-tooltip.lbl::before { display: none; }
+  .lbl { width: 0; height: 0; pointer-events: none; }
+  .lbl span { position: absolute; transform: translate(-50%, -50%); white-space: nowrap; background: rgba(255,255,255,.85);
+    padding: 1px 5px; font-size: 11px; color: #222; border-radius: 4px; }
   #toast { position: absolute; bottom: 120px; left: 50%; transform: translateX(-50%); z-index: 1000;
     background: rgba(0,0,0,.78); color: #fff; padding: 7px 14px; border-radius: 18px; font-size: 14px;
     opacity: 0; transition: opacity .2s; pointer-events: none; white-space: nowrap; }
@@ -72,7 +72,7 @@
   <div id="chips"></div>
   <button id="save">שמור</button>
   <div id="err"></div>
-  <div id="ver">גרסה 3</div>
+  <div id="ver">גרסה 4</div>
 </div>
 <div id="toast"></div>
 <script>
@@ -99,7 +99,7 @@ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 18, attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
 }).addTo(map);
 
-const ACCENT = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#2481cc";
+const ACCENT = (tg && tg.themeParams && /^#[0-9a-f]{6}$/i.test(tg.themeParams.button_color || "")) ? tg.themeParams.button_color : "#2481cc";
 function style(id) {
   const on = selected.has(id), city = props[id].kind === "city";
   return { color: on ? ACCENT : "#5b6b7c", weight: on ? 2.5 : 1, dashArray: city ? "4 4" : null,
@@ -115,7 +115,7 @@ function toast(msg) {
 
 function toggle(id, quiet) {
   selected.has(id) ? selected.delete(id) : selected.add(id);
-  layers[id].setStyle(style(id));
+  if (layers[id]) step("style", () => layers[id].setStyle(style(id)));
   try { if (tg && tg.HapticFeedback) tg.HapticFeedback.selectionChanged(); } catch (e) {}
   if (!quiet) toast((selected.has(id) ? "✓ " : "הוסר: ") + label(id));
   render();
@@ -273,30 +273,57 @@ function setupTaps(features) {
   }, true);
 }
 
+// A spot inside the area for its name: the middle of its biggest outline.
+function labelPoint(g) {
+  const polys = g.type === "Polygon" ? [g.coordinates] : g.coordinates;
+  let ring = polys[0][0];
+  polys.forEach(p => { if (p[0].length > ring.length) ring = p[0]; });
+  let x = 0, y = 0;
+  ring.forEach(c => { x += c[0]; y += c[1]; });
+  return [y / ring.length, x / ring.length];
+}
+
+function step(what, fn) {
+  try { return fn(); } catch (e) { showErr(what + ": " + (e && e.message ? e.message : e)); }
+}
+
 fetch("areas.geojson").then(r => r.json()).then(gj => {
   // whole cities first, so neighborhoods are drawn on top
   gj.features.sort((a, b) => (a.properties.kind === "city" ? 0 : 1) - (b.properties.kind === "city" ? 0 : 1));
-  gj.features.forEach(f => {
-    const p = f.properties; props[p.id] = p;
-    // Not interactive: taps are handled below, so a slightly moving finger still counts as a tap.
-    const layer = L.geoJSON(f, { style: () => style(p.id), interactive: false }).addTo(map);
-    layer.bindTooltip(p.name, { permanent: true, direction: "center", className: "lbl" });
-    layers[p.id] = layer;
-  });
-  setupTaps(gj.features);
-  const showLabels = () => {
+  // 1) know every area first, so the list and saving work even if drawing fails
+  gj.features.forEach(f => { props[f.properties.id] = f.properties; });
+  render();
+  // 2) draw them; each area on its own, so one failure doesn't stop the rest
+  const renderer = L.canvas({ padding: 0.5 });
+  const labels = {};
+  gj.features.forEach(f => step("draw " + f.properties.id, () => {
+    const p = f.properties;
+    // Not interactive: taps are handled in setupTaps, so a slightly moving finger still counts as a tap.
+    layers[p.id] = L.geoJSON(f, { style: () => style(p.id), interactive: false, renderer }).addTo(map);
+    const span = document.createElement("span");
+    span.textContent = p.name;
+    labels[p.id] = L.marker(labelPoint(f.geometry), { interactive: false, keyboard: false,
+      icon: L.divIcon({ className: "lbl", html: span, iconSize: null }) });
+  }));
+  step("taps", () => setupTaps(gj.features));
+  const showLabels = () => step("labels", () => {
     const z = map.getZoom();
-    Object.entries(layers).forEach(([id, l]) => {
+    Object.entries(labels).forEach(([id, l]) => {
       const on = props[id].kind === "city" ? z <= 13 : z >= 14 || (z >= 13 && selected.has(id));
-      on ? l.openTooltip() : l.closeTooltip();
+      on ? l.addTo(map) : l.remove();
     });
-  };
+  });
   map.on("zoomend", showLabels);
-  const sel = [...selected].filter(id => layers[id]);
-  if (sel.length) map.fitBounds(L.featureGroup(sel.map(id => layers[id])).getBounds(), { maxZoom: 14, padding: [20, 20] });
+  step("zoom", () => {
+    const sel = [...selected].filter(id => layers[id]);
+    if (sel.length) map.fitBounds(L.featureGroup(sel.map(id => layers[id])).getBounds(), { maxZoom: 14, padding: [20, 20] });
+  });
   showLabels();
   render();
-}).catch(() => { document.getElementById("count").textContent = "שגיאה בטעינת המפה, נסה שוב"; });
+}).catch(e => {
+  document.getElementById("count").textContent = "שגיאה בטעינת המפה. אפשר לנסות שוב או לבחור ברשימה";
+  showErr(e && e.message ? e.message : String(e));
+});
 </script>
 </body>
 </html>
