@@ -72,16 +72,25 @@
   <div id="chips"></div>
   <button id="save">שמור</button>
   <div id="err"></div>
-  <div id="ver">גרסה 4</div>
+  <div id="ver">גרסה 5</div>
 </div>
 <div id="toast"></div>
 <script>
 // Show any error on screen, so a screenshot from the phone tells what went wrong.
-function showErr(msg) { const e = document.getElementById("err"); if (e) e.textContent += "⚠️ " + msg + " "; }
+// Only the first error and a count, so a repeating error can't push the map off the screen.
+let errCount = 0, firstErr = "";
+function showErr(msg) {
+  const e = document.getElementById("err");
+  errCount++;
+  if (!firstErr) firstErr = String(msg).slice(0, 160);
+  if (e) e.textContent = "⚠️ " + firstErr + (errCount > 1 ? ` (+${errCount - 1})` : "");
+}
 window.addEventListener("error", e => showErr((e.message || "error") + (e.lineno ? " @" + e.lineno : "")));
 window.addEventListener("unhandledrejection", e => showErr(String(e.reason)));
 </script>
 <script>
+// Everything inside its own scope: Telegram on iPhone adds its own global names (e.g. "style") to the page.
+(function () {
 const tg = window.Telegram && Telegram.WebApp;
 const inTelegram = !!(tg && tg.initData !== undefined && tg.platform && tg.platform !== "unknown");
 if (tg) {
@@ -100,7 +109,7 @@ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
 }).addTo(map);
 
 const ACCENT = (tg && tg.themeParams && /^#[0-9a-f]{6}$/i.test(tg.themeParams.button_color || "")) ? tg.themeParams.button_color : "#2481cc";
-function style(id) {
+function areaStyle(id) {
   const on = selected.has(id), city = props[id].kind === "city";
   return { color: on ? ACCENT : "#5b6b7c", weight: on ? 2.5 : 1, dashArray: city ? "4 4" : null,
            fillColor: on ? ACCENT : "#8aa0b6", fillOpacity: on ? 0.45 : (city ? 0.04 : 0.1) };
@@ -115,7 +124,7 @@ function toast(msg) {
 
 function toggle(id, quiet) {
   selected.has(id) ? selected.delete(id) : selected.add(id);
-  if (layers[id]) step("style", () => layers[id].setStyle(style(id)));
+  if (layers[id]) step("style", () => layers[id].setStyle(areaStyle(id)));
   try { if (tg && tg.HapticFeedback) tg.HapticFeedback.selectionChanged(); } catch (e) {}
   if (!quiet) toast((selected.has(id) ? "✓ " : "הוסר: ") + label(id));
   render();
@@ -190,7 +199,7 @@ function save() {
 document.getElementById("save").onclick = save;
 if (inTelegram) tg.MainButton.onClick(save);
 document.getElementById("clear").onclick = () => {
-  [...selected].forEach(id => { selected.delete(id); layers[id] && layers[id].setStyle(style(id)); });
+  [...selected].forEach(id => { selected.delete(id); layers[id] && layers[id].setStyle(areaStyle(id)); });
   render();
 };
 
@@ -299,7 +308,7 @@ fetch("areas.geojson").then(r => r.json()).then(gj => {
   gj.features.forEach(f => step("draw " + f.properties.id, () => {
     const p = f.properties;
     // Not interactive: taps are handled in setupTaps, so a slightly moving finger still counts as a tap.
-    layers[p.id] = L.geoJSON(f, { style: () => style(p.id), interactive: false, renderer }).addTo(map);
+    layers[p.id] = L.geoJSON(f, { style: () => areaStyle(p.id), interactive: false, renderer }).addTo(map);
     const span = document.createElement("span");
     span.textContent = p.name;
     labels[p.id] = L.marker(labelPoint(f.geometry), { interactive: false, keyboard: false,
@@ -324,6 +333,7 @@ fetch("areas.geojson").then(r => r.json()).then(gj => {
   document.getElementById("count").textContent = "שגיאה בטעינת המפה. אפשר לנסות שוב או לבחור ברשימה";
   showErr(e && e.message ? e.message : String(e));
 });
+})();
 </script>
 </body>
 </html>
